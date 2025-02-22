@@ -1,0 +1,18 @@
+# Telegram Bot API
+python-telegram-bot==20.7
+
+# PostgreSQL Database Connection
+psycopg2-binary==2.9.9
+
+# Web Scraping
+beautifulsoup4==4.12.2
+requests==2.31.0
+
+# Job Scheduling
+APScheduler==3.10.4
+
+# Environment Variables Management
+python-dotenv==1.0.1
+
+# Async Handling
+httpx==0.26.0
