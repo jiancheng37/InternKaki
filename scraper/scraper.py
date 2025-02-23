@@ -1,6 +1,7 @@
 import logging
 from bs4 import BeautifulSoup
 from .utils import clean_text, make_request
+import urllib
 
 def scrape_internsg(keywords):
     """Scrapes InternSG for internships based on user keywords."""
@@ -8,6 +9,7 @@ def scrape_internsg(keywords):
     internships = []
 
     for keyword in keywords:
+        encoded_keyword = urllib.parse.quote_plus(keyword)
         url = base_url.format(keyword)
         logging.info(f"🔍 Scraping InternSG for keyword: {keyword}")
 
