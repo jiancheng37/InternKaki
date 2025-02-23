@@ -1,6 +1,12 @@
 import logging
 from bs4 import BeautifulSoup
 from .utils import clean_text, make_request
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import urllib
+
 
 def scrape_internsg(keywords):
     """Scrapes InternSG for internships based on user keywords."""
@@ -8,7 +14,8 @@ def scrape_internsg(keywords):
     internships = []
 
     for keyword in keywords:
-        url = base_url.format(keyword)
+        encoded_keyword = urllib.parse.quote_plus(keyword)
+        url = base_url.format(encoded_keyword)
         logging.info(f"🔍 Scraping InternSG for keyword: {keyword}")
 
         response = make_request(url)
@@ -59,3 +66,43 @@ def scrape_internsg(keywords):
 
     logging.info(f"✅ Scraping completed! {len(internships)} internships found.")
     return internships
+
+def scrape_indeed(keywords):
+
+    chrome_driver_path = "/opt/homebrew/bin/chromedriver"  # Update if different
+
+    chrome_options = Options()
+
+    # Start ChromeDriver
+    service = Service(chrome_driver_path)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    # Open the Indeed job listings page
+    driver.get("https://www.indeed.com/jobs?q=your+search+query")
+
+    # Wait until the job listings are loaded
+    job_cards = WebDriverWait(driver, 15).until(
+        EC.presence_of_all_elements_located((By.CSS_SELECTOR, "li.css-1ac2h1w"))
+    )
+
+    # Loop through each job card and extract details
+    for card in job_cards:
+        try:
+            # Extract job title from the <h2> element's nested <a> tag
+            job_title = card.find_element(By.CSS_SELECTOR, "h2.jobTitle a").get_attribute("title")
+            
+            # Extract company name using its data-testid attribute
+            company = card.find_element(By.CSS_SELECTOR, "span[data-testid='company-name']").text
+            
+            # Extract job location using its data-testid attribute
+            location = card.find_element(By.CSS_SELECTOR, "div[data-testid='text-location']").text
+            
+            print("Job Title:", job_title)
+            print("Company:", company)
+            print("Location:", location)
+            print("-" * 40)
+        except Exception as e:
+            print("Error extracting data from a job card:", e)
+
+    # Close the driver once done
+    driver.quit()
