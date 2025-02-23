@@ -11,7 +11,7 @@ def scrape_internsg(keywords):
     for keyword in keywords:
         encoded_keyword = urllib.parse.quote_plus(keyword)
         url = base_url.format(keyword)
-        logging.info(f"🔍 Scraping InternSG for keyword: {keyword}")
+        logging.info(f"🔍 Scraping InternSG for keyword: {encoded_keyword}")
 
         response = make_request(url)
 
