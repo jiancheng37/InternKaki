@@ -6,10 +6,10 @@ from telegram.ext import (
     ConversationHandler, CallbackContext, CallbackQueryHandler
 )
 from apscheduler.schedulers.background import BackgroundScheduler
-import psycopg2
 from bot.config import connect_db
 import logging
 import asyncio
+import time
 
 # Load environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -19,7 +19,7 @@ scheduler = BackgroundScheduler()  # Create global scheduler instance
 scheduler_started = False
 
 # Conversation States
-ROLE_ENTRY, ROLE_DELETE, ROLE_ADD = range(3)
+ROLE_ENTRY, ASK_NAME, ASK_EMAIL, ASK_CONTACT, ASK_START_DATE, ASK_END_DATE, ASK_SUMMARY, ROLE_DELETE, ROLE_ADD = range(7)
 
 # --- 1️⃣ /start Command ---
 async def start(update: Update, context: CallbackContext):
@@ -69,23 +69,8 @@ async def collect_role(update: Update, context: CallbackContext):
                 return ROLE_ENTRY
             
             logging.info(f"✅ User {chat_id} finalized roles: {roles}")
-            conn = connect_db()
-            cursor = conn.cursor()
-
-            # Store user preferences in PostgreSQL
-            cursor.execute("""
-                INSERT INTO users (chat_id, roles) VALUES (%s, %s)
-                ON CONFLICT (chat_id) DO UPDATE SET roles = EXCLUDED.roles
-            """, (chat_id, roles))
-            conn.commit()
-            conn.close()
-            logging.info(f"💾 Saved user {chat_id} roles to database: {roles}")
-
-            await update.message.reply_text(f"You're subscribed! You'll receive job alerts for: {', '.join(roles)}.")
-
-            # Start job alerts only for this user
-            start_user_scheduler(chat_id)
-            logging.info(f"🚀 Started job alerts for user {chat_id}")
+            await update.message.reply_text("Great! Now, let's collect your personal details. What's your full name?")
+            return ASK_NAME
 
             return ConversationHandler.END
         elif len(context.user_data["roles"]) >= 5:
@@ -106,6 +91,72 @@ async def collect_role(update: Update, context: CallbackContext):
         logging.error(f"❌ Error in collect_role(): {e}", exc_info=True)
         await update.message.reply_text("An error occurred. Please try again later.")
         return ROLE_ENTRY
+    
+async def collect_name(update: Update, context: CallbackContext):
+    """Collects user's full name."""
+    context.user_data["name"] = update.message.text.strip()
+    await update.message.reply_text("Got it! Now, enter your email address.")
+    return ASK_EMAIL
+
+async def collect_email(update: Update, context: CallbackContext):
+    """Collects user's email."""
+    context.user_data["email"] = update.message.text.strip()
+    await update.message.reply_text("Thanks! Now, enter your contact number.")
+    return ASK_CONTACT
+
+async def collect_contact(update: Update, context: CallbackContext):
+    """Collects user's contact number."""
+    context.user_data["contact"] = update.message.text.strip()
+    await update.message.reply_text("Great! When are you available to start? (Format: DD-MM-YYYY)")
+    return ASK_START_DATE
+
+async def collect_start_date(update: Update, context: CallbackContext):
+    """Collects user's availability start date."""
+    context.user_data["start_date"] = update.message.text.strip()
+    await update.message.reply_text("Got it! When is your last available date? (Format: DD-MM-YYYY)")
+    return ASK_END_DATE
+
+async def collect_end_date(update: Update, context: CallbackContext):
+    """Collects user's availability end date."""
+    context.user_data["end_date"] = update.message.text.strip()
+    await update.message.reply_text("Almost done! Please provide a short text CV summary (e.g., skills, experience).")
+    return ASK_SUMMARY
+
+async def collect_summary(update: Update, context: CallbackContext):
+    """Collects user's executive summary."""
+    context.user_data["summary"] = update.message.text.strip()
+
+    # Save all user data to the database
+    chat_id = update.message.chat_id
+    try:
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO users (chat_id, roles, name, email, contact, start_date, end_date, summary) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                chat_id,
+                context.user_data["roles"],
+                context.user_data["name"],
+                context.user_data["email"],
+                context.user_data["contact"],
+                context.user_data["start_date"],
+                context.user_data["end_date"],
+                context.user_data["summary"],
+            ),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        await update.message.reply_text("✅ Registration complete! You'll now receive job alerts automatically.")
+        start_user_scheduler(chat_id)
+        logging.info(f"🎉 User {chat_id} successfully registered.")
+        return ConversationHandler.END
+
+    except Exception as e:
+        logging.error(f"❌ Error saving user {chat_id} to database: {e}", exc_info=True)
+        await update.message.reply_text("❌ An error occurred while saving your data. Please try again.")
+        return ConversationHandler.END
     
 async def delete_role(update: Update, context: CallbackContext):
     """Starts the delete role process by showing the user their roles."""
@@ -215,7 +266,7 @@ def start_user_scheduler(chat_id=None):
         if scheduler.get_job(job_id):
             return
         
-        scheduler.add_job(schedule_check_jobs_for_user, "interval", minutes=1, args=[chat_id], id=job_id)
+        scheduler.add_job(schedule_check_jobs_for_user, "interval", minutes=20, args=[chat_id], id=job_id)
         logging.info(f"✅ Scheduled job alerts for user {chat_id}")
     
     else:
@@ -231,7 +282,7 @@ def start_user_scheduler(chat_id=None):
             job_id = f"job_{chat_id}"
             
             if not scheduler.get_job(job_id):
-                scheduler.add_job(schedule_check_jobs_for_user, "interval", minutes=1, args=[chat_id], id=job_id)
+                scheduler.add_job(schedule_check_jobs_for_user, "interval", minutes=20, args=[chat_id], id=job_id)
                 logging.info(f"✅ Scheduled job alerts for user {chat_id}")
 
     # Only start the scheduler if it's not already running
@@ -242,7 +293,7 @@ def start_user_scheduler(chat_id=None):
 
 
 # --- 4️⃣ Check Jobs Only for This User ---
-async def check_jobs_for_user(chat_id):
+async def check_and_apply_jobs_for_user(chat_id):
     """Fetches new job postings and sends alerts only for jobs the user hasn't seen."""
     logging.info(f"🔍 Checking jobs for user {chat_id}")
     try:
@@ -313,12 +364,306 @@ async def check_jobs_for_user(chat_id):
         if conn:
             cursor.close()
             conn.close() 
+            
+async def apply_for_job(job_url, chat_id):
+    """Determines the application method and applies accordingly."""
+    application_method, application_info = extract_application_method(job_url)
+
+    if application_method == "email":
+        message = f"📌 This job requires **email application**.\n📧 Please send your CV to: {application_info}\n🔗 Job Link: {job_url}"
+        await bot.send_message(chat_id=chat_id, text=message)
+        logging.info(f"📧 Notified user {chat_id} to apply via email: {application_info}")
+        return False  # Application not automated
+
+    elif application_method == "internsg":
+        logging.info(f"✅ Proceeding with InternSG automated application for {job_url}")
+
+        # Extract the direct application form URL
+        application_form_url = extract_application_url(job_url)
+        if not application_form_url:
+            return False  
+
+        # Fetch user data from the database
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name, email, contact, start_date, end_date, summary 
+            FROM users 
+            WHERE chat_id = %s
+        """, (chat_id,))
+        user_data = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        # Validate that all necessary fields are filled
+        if not user_data or None in user_data:
+            logging.error(f"❌ Missing user data for chat_id {chat_id}. Cannot proceed.")
+            await bot.send_message(chat_id=chat_id, text="❌ Your profile is incomplete. Please update your details using /edit_profile.")
+            return False
+
+        # Map database results to field names
+        user_profile = {
+            "name": user_data[0],
+            "email": user_data[1],
+            "contact": user_data[2],
+            "availability": f"From {user_data[3]} - {user_data[4]}",  # Start & End date formatted
+            "summary": user_data[5]
+        }
+
+        # Now, fill out the form
+        success = fill_application_form(application_form_url, user_profile)
+        return success
+
+    elif application_method == "website":
+        message = f"🌐 This job requires application via the **company's website**.\n🔗 Apply here: {application_info}\n🔗 Job Link: {job_url}"
+        await bot.send_message(chat_id=chat_id, text=message)
+        logging.info(f"🌐 Notified user {chat_id} to apply via company website: {application_info}")
+        return False  # Application not automated
+
+    else:
+        logging.warning(f"⚠️ Unknown application method for {job_url}")
+        return False
+
+
+def extract_application_method(job_url):
+    """Checks the job page for application instructions and determines the correct method."""
+    logging.info(f"🔄 Checking application method for: {job_url}")
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(job_url, headers=headers)
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    # Find all divs with class "ast-row p-3"
+    application_sections = soup.find_all("div", class_="ast-row p-3")
+
+    for section in application_sections:
+        # Check if this section contains "Application Instructions"
+        label = section.find("div", class_="ast-col-md-2 font-weight-bold")
+        content = section.find("div", class_="ast-col-md-10")
+
+        if label and "Application Instructions" in label.get_text(strip=True):
+            application_text = content.get_text(strip=True)
+            logging.info(f"📌 Application instructions: {application_text}")
+
+            # Check if the job requires email application
+            if "email" in application_text.lower():
+                email = None
+                words = application_text.split()
+                for word in words:
+                    if "@" in word:  # Likely an email address
+                        email = word.strip()
+                        break
+                return "email", email  # Notify user to apply via email
+
+            # Check if it allows InternSG application
+            if "text cv using internsg" in application_text.lower():
+                return "internsg", None  # Proceed with automation
+
+            # Check if the job requires applying via an external company website
+            for link in content.find_all("a", href=True):
+                if "http" in link["href"]:  # Ensure it's an external link
+                    return "website", link["href"]  # Notify user to apply via this website
+
+    logging.warning(f"⚠️ No clear application method found for {job_url}")
+    return None, None  # Unknown application method
+
+def extract_application_url(job_url):
+    """Extracts the direct application link from the job details page."""
+    logging.info(f"🔄 Extracting application URL from: {job_url}")
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(job_url, headers=headers)
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    # Find the "Apply for this position" button
+    apply_button = soup.find("a", class_="ast-button btn-block btn-apply")
+
+    if apply_button and "href" in apply_button.attrs:
+        application_url = f"https://www.internsg.com{apply_button['href']}"
+        logging.info(f"✅ Extracted application link: {application_url}")
+        return application_url
+
+    logging.warning(f"⚠️ No application link found on {job_url}")
+    return None
+
+def fill_application_form(application_url, user_data):
+    """Fills out and submits the job application form automatically."""
+    logging.info(f"📝 Filling out application form: {application_url}")
+
+    # Setup Selenium WebDriver
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")  # Run in background
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+
+    service = Service("/opt/homebrew/bin/chromedriver")  # Update path if needed
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    try:
+        # Step 1: Open the application form page
+        driver.get(application_url)
+        time.sleep(3)  # Allow page to load
+
+        # Step 2: Fill out the form
+        driver.find_element(By.ID, "applicant_name").send_keys(user_data["name"])
+        driver.find_element(By.ID, "applicant_email").send_keys(user_data["email"])
+        driver.find_element(By.ID, "applicant_contact").send_keys(user_data["contact"])
+        driver.find_element(By.ID, "applicant_period").send_keys(user_data["availability"])
+        driver.find_element(By.ID, "applicant_summary").send_keys(user_data["summary"])
+
+        # Step 3: Submit the application
+        submit_button = driver.find_element(By.ID, "btnSubmit")
+        submit_button.click()
+        logging.info(f"✅ Application submitted successfully: {application_url}")
+
+        driver.quit()
+        return True  # Application successful
+
+    except Exception as e:
+        logging.error(f"❌ Error filling application for {application_url}: {e}")
+        driver.quit()
+        return False  # Application failed
+
 
 def schedule_check_jobs_for_user(chat_id):
     """Synchronous wrapper for async function."""
     asyncio.run(check_jobs_for_user(chat_id)) 
 
-# --- 5️⃣ /stop Command ---
+async def edit_profile(update: Update, context: CallbackContext):
+    """Allows users to edit their profile details."""
+    chat_id = update.message.chat_id
+    logging.info(f"📝 User {chat_id} is editing their profile.")
+
+    # Create buttons for each field the user can edit
+    keyboard = [
+        [InlineKeyboardButton("📝 Name", callback_data="edit_name")],
+        [InlineKeyboardButton("📧 Email", callback_data="edit_email")],
+        [InlineKeyboardButton("📞 Contact Number", callback_data="edit_contact")],
+        [InlineKeyboardButton("📅 Start Date", callback_data="edit_start_date")],
+        [InlineKeyboardButton("📅 End Date", callback_data="edit_end_date")],
+        [InlineKeyboardButton("📜 Executive Summary", callback_data="edit_summary")],
+        [InlineKeyboardButton("✅ Done", callback_data="done_editing")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text("Which detail would you like to edit?", reply_markup=reply_markup)
+
+async def handle_edit_choice(update: Update, context: CallbackContext):
+    """Handles which field the user wants to edit."""
+    query = update.callback_query
+    await query.answer()
+    
+    field_map = {
+        "edit_name": ASK_NAME,
+        "edit_email": ASK_EMAIL,
+        "edit_contact": ASK_CONTACT,
+        "edit_start_date": ASK_START_DATE,
+        "edit_end_date": ASK_END_DATE,
+        "edit_summary": ASK_SUMMARY
+    }
+
+    if query.data in field_map:
+        await query.edit_message_text(f"Enter your new {query.data.replace('edit_', '').replace('_', ' ')}:")
+        return field_map[query.data]
+
+    elif query.data == "done_editing":
+        await query.edit_message_text("✅ Profile update complete.")
+        return ConversationHandler.END
+
+    return ConversationHandler.END
+
+async def update_name(update: Update, context: CallbackContext):
+    """Updates the user's name."""
+    new_name = update.message.text.strip()
+    chat_id = update.message.chat_id
+
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET name = %s WHERE chat_id = %s", (new_name, chat_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    await update.message.reply_text(f"✅ Your name has been updated to: {new_name}")
+    return ConversationHandler.END
+
+async def update_email(update: Update, context: CallbackContext):
+    """Updates the user's email."""
+    new_email = update.message.text.strip()
+    chat_id = update.message.chat_id
+
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET email = %s WHERE chat_id = %s", (new_email, chat_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    await update.message.reply_text(f"✅ Your email has been updated to: {new_email}")
+    return ConversationHandler.END
+
+async def update_contact(update: Update, context: CallbackContext):
+    """Updates the user's contact number."""
+    new_contact = update.message.text.strip()
+    chat_id = update.message.chat_id
+
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET contact = %s WHERE chat_id = %s", (new_contact, chat_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    await update.message.reply_text(f"✅ Your contact number has been updated to: {new_contact}")
+    return ConversationHandler.END
+
+async def update_start_date(update: Update, context: CallbackContext):
+    """Updates the user's availability start date."""
+    new_start_date = update.message.text.strip()
+    chat_id = update.message.chat_id
+
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET start_date = %s WHERE chat_id = %s", (new_start_date, chat_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    await update.message.reply_text(f"✅ Your availability start date has been updated to: {new_start_date}")
+    return ConversationHandler.END
+
+async def update_end_date(update: Update, context: CallbackContext):
+    """Updates the user's availability end date."""
+    new_end_date = update.message.text.strip()
+    chat_id = update.message.chat_id
+
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET end_date = %s WHERE chat_id = %s", (new_end_date, chat_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    await update.message.reply_text(f"✅ Your availability end date has been updated to: {new_end_date}")
+    return ConversationHandler.END
+
+async def update_summary(update: Update, context: CallbackContext):
+    """Updates the user's executive summary."""
+    new_summary = update.message.text.strip()
+    chat_id = update.message.chat_id
+
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET summary = %s WHERE chat_id = %s", (new_summary, chat_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    await update.message.reply_text("✅ Your executive summary has been updated.")
+    return ConversationHandler.END
+
+# --- /stop Command ---
 async def stop(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
     conn = connect_db()
@@ -339,12 +684,20 @@ async def stop(update: Update, context: CallbackContext):
     conn.close()
     return ConversationHandler.END
 
-# --- 6️⃣ Register Handlers ---
+# --- Register Handlers ---
 def register_handlers(app: Application):
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
-        states={ROLE_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_role)]},
-        fallbacks=[]
+        states={
+            ROLE_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_role)],
+            ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_name)],
+            ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_email)],
+            ASK_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_contact)],
+            ASK_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_start_date)],
+            ASK_END_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_end_date)],
+            ASK_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_summary)],
+        },
+        fallbacks=[],
     )
 
     delete_conv_handler = ConversationHandler(
@@ -363,7 +716,23 @@ def register_handlers(app: Application):
         states={ROLE_ENTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_role)]},
         fallbacks=[]
     )
+
+    edit_profile_handler = ConversationHandler(
+    entry_points=[CommandHandler("edit_profile", edit_profile)],
+    states={
+        ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_name)],
+        ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_email)],
+        ASK_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_contact)],
+        ASK_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_start_date)],
+        ASK_END_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_end_date)],
+        ASK_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_summary)],
+    },
+    fallbacks=[],
+    )
+
     app.add_handler(conv_handler)
     app.add_handler(delete_conv_handler)
     app.add_handler(add_conv_handler)
     app.add_handler(CommandHandler("stop", stop))
+    app.add_handler(edit_profile_handler)
+    app.add_handler(CallbackQueryHandler(handle_edit_choice, pattern="^edit_.*|^done_editing$"))

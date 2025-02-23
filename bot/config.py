@@ -28,7 +28,13 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             chat_id BIGINT PRIMARY KEY,
-            roles TEXT[]
+            roles TEXT[],
+            name TEXT,
+            email TEXT,
+            contact TEXT,
+            start_date TEXT,
+            end_date TEXT,
+            summary TEXT
         );
     """)
     cur.execute("""
